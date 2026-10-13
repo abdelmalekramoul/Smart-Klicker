@@ -1,4 +1,4 @@
-name: Build Smart-AutoClicker v3 (No Ads + New App ID + Full Source & APK ZIP)
+name: Build Smart-Klicker v3 (Standalone Self-Contained Workflow)
 
 on:
   workflow_dispatch:
@@ -9,34 +9,472 @@ jobs:
   build-v3:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository with Submodules & Original Assets
+      - name: 1. Checkout Repository with Submodules & Original Assets
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Set up JDK 17
+      - name: 2. Set up JDK 21 (Required for AGP 9+ / Gradle)
         uses: actions/setup-java@v4
         with:
-          java-version: "17"
+          java-version: "21"
           distribution: "temurin"
 
-      - name: Apply Smart Scenario v3 + New App ID (com.buzbuz.smartautoclicker.v3pro) + Remove Ads
+      - name: 3. Inject Smart Scenario v3 Architecture + Change App Metadata + Remove Ads
+        shell: bash
         run: |
-          python3 build_smart_autoclicker_v3_apk.py --patch-only .
+          python3 - << 'EOF'
+          import re
+          from pathlib import Path
 
-      - name: Compile Ad-Free APK (fDroid Flavor with All Original Assets)
+          repo_dir = Path(".").resolve()
+          NEW_APP_ID = "com.buzbuz.smartautoclicker.v3pro"
+          NEW_APP_NAME = "Smart Klicker v3"
+
+          # 1. Change applicationId (while keeping namespace intact so R & BuildConfig compile cleanly)
+          for kts in repo_dir.rglob("*.gradle.kts"):
+              if ".gradle" in kts.parts or "build" in kts.parts:
+                  continue
+              txt = kts.read_text(encoding="utf-8", errors="ignore")
+              updated = re.sub(
+                  r'applicationId\s*=\s*"com\.buzbuz\.smartautoclicker"',
+                  f'applicationId = "{NEW_APP_ID}"',
+                  txt,
+              )
+              if updated != txt:
+                  kts.write_text(updated, encoding="utf-8")
+                  print(f"[Metadata] Updated applicationId -> {NEW_APP_ID} in {kts.relative_to(repo_dir)}")
+
+          # Also ensure smartautoclicker/build.gradle.kts explicitly sets applicationId if defined via convention plugin
+          app_gradle = repo_dir / "smartautoclicker" / "build.gradle.kts"
+          if app_gradle.exists():
+              gtxt = app_gradle.read_text(encoding="utf-8")
+              if NEW_APP_ID not in gtxt and "defaultConfig {" in gtxt:
+                  gtxt = gtxt.replace(
+                      "defaultConfig {",
+                      'defaultConfig {\n        applicationId = "' + NEW_APP_ID + '"',
+                      1,
+                  )
+                  app_gradle.write_text(gtxt, encoding="utf-8")
+                  print("[Metadata] Injected explicit applicationId into smartautoclicker/build.gradle.kts")
+
+          # 2. Update app_name in strings.xml so it appears as a new app on the phone
+          app_src = repo_dir / "smartautoclicker" / "src"
+          if app_src.exists():
+              for strings_xml in app_src.rglob("strings.xml"):
+                  xml_txt = strings_xml.read_text(encoding="utf-8", errors="ignore")
+                  updated_xml = re.sub(
+                      r'(<string\s+name="app_name"[^>]*>)(.*?)(</string>)',
+                      rf'\1{NEW_APP_NAME}\3',
+                      xml_txt,
+                  )
+                  if updated_xml != xml_txt:
+                      strings_xml.write_text(updated_xml, encoding="utf-8")
+                      print(f"[Metadata] Updated app_name -> {NEW_APP_NAME} in {strings_xml.relative_to(repo_dir)}")
+
+          # 2b. Update any hardcoded provider authorities in AndroidManifest.xml so both apps install side-by-side without conflict
+          for manifest in repo_dir.rglob("AndroidManifest.xml"):
+              if "build" in manifest.parts:
+                  continue
+              mtxt = manifest.read_text(encoding="utf-8", errors="ignore")
+              updated_m = re.sub(
+                  r'android:authorities="com\.buzbuz\.smartautoclicker(\.[^"]*)"',
+                  rf'android:authorities="{NEW_APP_ID}\1"',
+                  mtxt,
+              )
+              if updated_m != mtxt:
+                  manifest.write_text(updated_m, encoding="utf-8")
+                  print(f"[Metadata] Updated provider authority in {manifest.relative_to(repo_dir)}")
+
+          # 3. Write Smart Scenario v3 Architecture files (RepeatPolicy, TapAndHold, SkipEvent, FlowElement, V3Processor)
+          # Placed in additive v3 packages inside core/smart/domain and core/smart/processing so 100% of existing
+          # project files compile without any signature conflict.
+          v3_files = {
+              "core/smart/domain/src/main/java/com/buzbuz/smartautoclicker/core/domain/model/v3/RepeatPolicy.kt": """package com.buzbuz.smartautoclicker.core.domain.model.v3
+
+          sealed class RepeatPolicy {
+              abstract val intervalMs: Long
+              abstract val stopConditionGroup: V3ConditionGroup?
+
+              data object Once : RepeatPolicy() {
+                  override val intervalMs: Long = 0L
+                  override val stopConditionGroup: V3ConditionGroup? = null
+              }
+
+              data class ByCount(
+                  val count: Int,
+                  override val intervalMs: Long = 50L,
+                  override val stopConditionGroup: V3ConditionGroup? = null,
+              ) : RepeatPolicy()
+
+              data class ByDuration(
+                  val durationMs: Long,
+                  override val intervalMs: Long = 50L,
+                  override val stopConditionGroup: V3ConditionGroup? = null,
+              ) : RepeatPolicy()
+
+              data class Infinite(
+                  override val intervalMs: Long = 50L,
+                  override val stopConditionGroup: V3ConditionGroup? = null,
+              ) : RepeatPolicy()
+          }
+          """,
+              "core/smart/domain/src/main/java/com/buzbuz/smartautoclicker/core/domain/model/v3/V3ConditionGroup.kt": """package com.buzbuz.smartautoclicker.core.domain.model.v3
+
+          import com.buzbuz.smartautoclicker.core.base.identifier.Identifier
+
+          enum class LogicalOperator { AND, OR }
+
+          data class V3ConditionGroup(
+              val operator: LogicalOperator = LogicalOperator.AND,
+              val inverted: Boolean = false,
+              val conditionIds: List<Identifier> = emptyList(),
+              val subGroups: List<V3ConditionGroup> = emptyList(),
+          ) {
+              fun isEmpty(): Boolean = conditionIds.isEmpty() && subGroups.isEmpty()
+          }
+          """,
+              "core/smart/domain/src/main/java/com/buzbuz/smartautoclicker/core/domain/model/v3/V3TouchActions.kt": """package com.buzbuz.smartautoclicker.core.domain.model.v3
+
+          import android.graphics.Point
+          import com.buzbuz.smartautoclicker.core.base.identifier.Identifier
+
+          /**
+           * Dedicated Fast/Multi Click (separate from TapAndHold) with RepeatPolicy (Once, ByCount, ByDuration, Infinite).
+           */
+          data class V3ClickAction(
+              val id: Identifier,
+              val eventId: Identifier,
+              val name: String,
+              val position: Point? = null,
+              val conditionIdToClick: Identifier? = null,
+              val tapDurationMs: Long = 15L,
+              val repeatPolicy: RepeatPolicy = RepeatPolicy.Once,
+              val preConditionGroup: V3ConditionGroup? = null,
+              val nextElementId: Identifier? = null,
+          )
+
+          sealed class HoldReleaseMode {
+              data class FixedDuration(val holdDurationMs: Long) : HoldReleaseMode()
+              data class UntilCondition(
+                  val releaseCondition: V3ConditionGroup,
+                  val maxTimeoutMs: Long = 60_000L,
+              ) : HoldReleaseMode()
+              data class InfiniteHold(
+                  val releaseCondition: V3ConditionGroup? = null,
+              ) : HoldReleaseMode()
+          }
+
+          /**
+           * Dedicated Tap & Hold (Long Press / Continuous Hold) action, separate from V3ClickAction.
+           */
+          data class V3TapAndHoldAction(
+              val id: Identifier,
+              val eventId: Identifier,
+              val name: String,
+              val position: Point? = null,
+              val conditionIdToHold: Identifier? = null,
+              val holdMode: HoldReleaseMode = HoldReleaseMode.FixedDuration(1000L),
+              val repeatPolicy: RepeatPolicy = RepeatPolicy.Once,
+              val preConditionGroup: V3ConditionGroup? = null,
+              val nextElementId: Identifier? = null,
+          )
+
+          enum class SkipMode {
+              NEXT_EVENT_OR_LOOP,
+              JUMP_TO_EVENT,
+              JUMP_TO_ELEMENT,
+              RESTART_SCENARIO_LOOP,
+          }
+
+          /**
+           * Skip Event / Flow Jump action: advances from Event 1 -> Event 2, and loops back to Event 1 at the end.
+           */
+          data class V3SkipEventAction(
+              val id: Identifier,
+              val eventId: Identifier,
+              val name: String,
+              val skipMode: SkipMode = SkipMode.NEXT_EVENT_OR_LOOP,
+              val targetEventId: Identifier? = null,
+              val targetElementId: Identifier? = null,
+              val disableCurrentEvent: Boolean = true,
+              val preConditionGroup: V3ConditionGroup? = null,
+          )
+          """,
+              "core/smart/domain/src/main/java/com/buzbuz/smartautoclicker/core/domain/model/v3/FlowElement.kt": """package com.buzbuz.smartautoclicker.core.domain.model.v3
+
+          import com.buzbuz.smartautoclicker.core.base.identifier.Identifier
+
+          /**
+           * Programmable Flow Graph Elements (Nodes) that link together like statements in a programming language.
+           */
+          sealed class FlowElement {
+              abstract val id: Identifier
+              abstract val eventId: Identifier
+              abstract val name: String
+
+              data class ConditionBranchNode(
+                  override val id: Identifier,
+                  override val eventId: Identifier,
+                  override val name: String,
+                  val conditionGroup: V3ConditionGroup,
+                  val onTrueElementId: Identifier?,
+                  val onFalseElementId: Identifier? = null,
+              ) : FlowElement()
+
+              data class ClickNode(
+                  override val id: Identifier,
+                  override val eventId: Identifier,
+                  override val name: String,
+                  val clickAction: V3ClickAction,
+                  val nextElementId: Identifier? = null,
+              ) : FlowElement()
+
+              data class TapAndHoldNode(
+                  override val id: Identifier,
+                  override val eventId: Identifier,
+                  override val name: String,
+                  val tapAndHoldAction: V3TapAndHoldAction,
+                  val nextElementId: Identifier? = null,
+              ) : FlowElement()
+
+              data class SkipNode(
+                  override val id: Identifier,
+                  override val eventId: Identifier,
+                  override val name: String,
+                  val skipAction: V3SkipEventAction,
+              ) : FlowElement()
+
+              data class LoopNode(
+                  override val id: Identifier,
+                  override val eventId: Identifier,
+                  override val name: String,
+                  val repeatPolicy: RepeatPolicy,
+                  val bodyStartElementId: Identifier,
+                  val afterLoopElementId: Identifier? = null,
+              ) : FlowElement()
+          }
+          """,
+              "core/smart/processing/src/main/java/com/buzbuz/smartautoclicker/core/processing/data/processor/v3/SmartScenarioV3Engine.kt": """package com.buzbuz.smartautoclicker.core.processing.data.processor.v3
+
+          import com.buzbuz.smartautoclicker.core.base.identifier.Identifier
+          import com.buzbuz.smartautoclicker.core.domain.model.v3.*
+          import kotlinx.coroutines.delay
+
+          interface V3TouchBridge {
+              suspend fun tap(x: Int, y: Int, durationMs: Long)
+              suspend fun touchDown(x: Int, y: Int)
+              suspend fun touchUp(x: Int, y: Int)
+          }
+
+          /**
+           * Execution engine for Smart Scenario v3:
+           * - Evaluates nested V3ConditionGroup trees (Sub-conditions)
+           * - Separates V3ClickAction and V3TapAndHoldAction with RepeatPolicy (Once, ByCount, ByDuration, Infinite)
+           * - Links FlowElement nodes and executes SkipEvent transitions with automatic loop back to Event 1
+           */
+          class SmartScenarioV3Engine(
+              private val orderedEventIds: List<Identifier>,
+              private val touchBridge: V3TouchBridge,
+              private val conditionEvaluator: suspend (Identifier) -> Boolean,
+              private val isRunning: () -> Boolean,
+              private val currentTimeMs: () -> Long = System::currentTimeMillis,
+          ) {
+              private val enabledEvents = orderedEventIds.associateWith { true }.toMutableMap()
+
+              fun executeSkipTransition(
+                  currentEventId: Identifier,
+                  skipMode: SkipMode,
+                  targetEventId: Identifier? = null,
+                  disableCurrent: Boolean = true,
+              ): Identifier? {
+                  if (orderedEventIds.isEmpty()) return null
+                  val idx = orderedEventIds.indexOf(currentEventId)
+                  if (idx == -1) return null
+
+                  if (disableCurrent && orderedEventIds.size > 1) {
+                      enabledEvents[currentEventId] = false
+                  }
+
+                  val nextId = when (skipMode) {
+                      SkipMode.NEXT_EVENT_OR_LOOP -> orderedEventIds[(idx + 1) % orderedEventIds.size]
+                      SkipMode.JUMP_TO_EVENT -> targetEventId ?: orderedEventIds[(idx + 1) % orderedEventIds.size]
+                      SkipMode.JUMP_TO_ELEMENT -> currentEventId
+                      SkipMode.RESTART_SCENARIO_LOOP -> orderedEventIds.first()
+                  }
+                  enabledEvents[nextId] = true
+                  return nextId
+              }
+
+              suspend fun evaluateConditionGroup(group: V3ConditionGroup): Boolean {
+                  if (group.isEmpty()) return true
+                  val rawResult = when (group.operator) {
+                      LogicalOperator.AND -> {
+                          group.conditionIds.all { conditionEvaluator(it) } &&
+                              group.subGroups.all { evaluateConditionGroup(it) }
+                      }
+                      LogicalOperator.OR -> {
+                          group.conditionIds.any { conditionEvaluator(it) } ||
+                              group.subGroups.any { evaluateConditionGroup(it) }
+                      }
+                  }
+                  return if (group.inverted) !rawResult else rawResult
+              }
+
+              suspend fun executeFlowGraph(
+                  entryElementId: Identifier?,
+                  elements: Map<Identifier, FlowElement>,
+              ): Identifier? {
+                  var currentId = entryElementId
+                  while (currentId != null && isRunning()) {
+                      when (val node = elements[currentId] ?: break) {
+                          is FlowElement.ConditionBranchNode -> {
+                              val matched = evaluateConditionGroup(node.conditionGroup)
+                              currentId = if (matched) node.onTrueElementId else node.onFalseElementId
+                          }
+                          is FlowElement.ClickNode -> {
+                              executeClick(node.clickAction)
+                              currentId = node.nextElementId ?: node.clickAction.nextElementId
+                          }
+                          is FlowElement.TapAndHoldNode -> {
+                              executeTapAndHold(node.tapAndHoldAction)
+                              currentId = node.nextElementId ?: node.tapAndHoldAction.nextElementId
+                          }
+                          is FlowElement.SkipNode -> {
+                              val skip = node.skipAction
+                              if (skip.skipMode == SkipMode.JUMP_TO_ELEMENT) {
+                                  currentId = skip.targetElementId
+                              } else {
+                                  return executeSkipTransition(
+                                      currentEventId = node.eventId,
+                                      skipMode = skip.skipMode,
+                                      targetEventId = skip.targetEventId,
+                                      disableCurrent = skip.disableCurrentEvent,
+                                  )
+                              }
+                          }
+                          is FlowElement.LoopNode -> {
+                              executeWithRepeatPolicy(node.repeatPolicy) {
+                                  executeFlowGraph(node.bodyStartElementId, elements)
+                              }
+                              currentId = node.afterLoopElementId
+                          }
+                      }
+                  }
+                  return null
+              }
+
+              suspend fun executeClick(action: V3ClickAction) {
+                  val pre = action.preConditionGroup
+                  if (pre != null && !evaluateConditionGroup(pre)) return
+                  val x = action.position?.x ?: 0
+                  val y = action.position?.y ?: 0
+                  executeWithRepeatPolicy(action.repeatPolicy) {
+                      touchBridge.tap(x, y, action.tapDurationMs)
+                  }
+              }
+
+              suspend fun executeTapAndHold(action: V3TapAndHoldAction) {
+                  val pre = action.preConditionGroup
+                  if (pre != null && !evaluateConditionGroup(pre)) return
+                  val x = action.position?.x ?: 0
+                  val y = action.position?.y ?: 0
+                  executeWithRepeatPolicy(action.repeatPolicy) {
+                      touchBridge.touchDown(x, y)
+                      try {
+                          when (val mode = action.holdMode) {
+                              is HoldReleaseMode.FixedDuration -> delay(mode.holdDurationMs)
+                              is HoldReleaseMode.UntilCondition -> {
+                                  val start = currentTimeMs()
+                                  while (isRunning() && (currentTimeMs() - start) < mode.maxTimeoutMs) {
+                                      if (evaluateConditionGroup(mode.releaseCondition)) break
+                                      delay(16L)
+                                  }
+                              }
+                              is HoldReleaseMode.InfiniteHold -> {
+                                  while (isRunning()) {
+                                      val rel = mode.releaseCondition
+                                      if (rel != null && evaluateConditionGroup(rel)) break
+                                      delay(16L)
+                                  }
+                              }
+                          }
+                      } finally {
+                          touchBridge.touchUp(x, y)
+                      }
+                  }
+              }
+
+              private suspend fun executeWithRepeatPolicy(
+                  policy: RepeatPolicy,
+                  block: suspend () -> Unit,
+              ) {
+                  suspend fun shouldStop(): Boolean {
+                      val stopGroup = policy.stopConditionGroup ?: return false
+                      return !stopGroup.isEmpty() && evaluateConditionGroup(stopGroup)
+                  }
+
+                  when (policy) {
+                      is RepeatPolicy.Once -> block()
+                      is RepeatPolicy.ByCount -> {
+                          for (i in 0 until policy.count) {
+                              if (!isRunning() || shouldStop()) break
+                              block()
+                              if (i < policy.count - 1 && policy.intervalMs > 0L) delay(policy.intervalMs)
+                          }
+                      }
+                      is RepeatPolicy.ByDuration -> {
+                          val start = currentTimeMs()
+                          while (isRunning() && (currentTimeMs() - start) < policy.durationMs) {
+                              if (shouldStop()) break
+                              block()
+                              if (policy.intervalMs > 0L) delay(policy.intervalMs)
+                          }
+                      }
+                      is RepeatPolicy.Infinite -> {
+                          while (isRunning()) {
+                              if (shouldStop()) break
+                              block()
+                              if (policy.intervalMs > 0L) delay(policy.intervalMs)
+                          }
+                      }
+                  }
+              }
+          }
+          """
+          }
+
+          for rel_path, code in v3_files.items():
+              p = repo_dir / rel_path
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(code.strip() + "\n", encoding="utf-8")
+              print(f"[SmartScenario v3] Created {rel_path}")
+          EOF
+
+      - name: 4. Prepare ONNX OCR Models & Gradle Permissions
+        shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew assembleFDroidDebug
+          if [ -f "./scripts/ocr-models/download_models.sh" ]; then
+            chmod +x ./scripts/ocr-models/download_models.sh
+            ./scripts/ocr-models/download_models.sh || true
+          fi
 
-      - name: Compress Full Modified Source Code + Compiled APK into One ZIP
+      - name: 5. Compile Ad-Free APK (fDroid Debug - Pre-Signed & Ready to Install)
+        shell: bash
+        run: |
+          ./gradlew assembleFDroidDebug --stacktrace
+
+      - name: 6. Compress Full Modified Source Code + Compiled APK into One ZIP
+        shell: bash
         run: |
           mkdir -p compiled_apk
           find smartautoclicker/build/outputs/apk -name "*.apk" -exec cp {} compiled_apk/ \;
+          ls -lh compiled_apk/
           zip -r Smart-AutoClicker-v3-Full-Source-And-APK.zip . -x ".git/*" ".gradle/*" "**/build/*"
           zip -r Smart-AutoClicker-v3-Full-Source-And-APK.zip compiled_apk/
 
-      - name: Upload Downloadable ZIP (Source Code + APK)
+      - name: 7. Upload Downloadable ZIP (Source Code + APK)
         uses: actions/upload-artifact@v4
         with:
           name: Smart-AutoClicker-v3-Full-Source-And-APK
