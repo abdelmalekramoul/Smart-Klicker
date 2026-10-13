@@ -31,32 +31,24 @@ jobs:
           NEW_APP_ID = "com.buzbuz.smartautoclicker.v3pro"
           NEW_APP_NAME = "Smart Klicker v3"
 
-          # 1. Change applicationId (while keeping namespace intact so R & BuildConfig compile cleanly)
-          for kts in repo_dir.rglob("*.gradle.kts"):
-              if ".gradle" in kts.parts or "build" in kts.parts:
-                  continue
-              txt = kts.read_text(encoding="utf-8", errors="ignore")
-              updated = re.sub(
-                  r'applicationId\s*=\s*"com\.buzbuz\.smartautoclicker"',
-                  f'applicationId = "{NEW_APP_ID}"',
-                  txt,
-              )
-              if updated != txt:
-                  kts.write_text(updated, encoding="utf-8")
-                  print(f"[Metadata] Updated applicationId -> {NEW_APP_ID} in {kts.relative_to(repo_dir)}")
-
-          # Also ensure smartautoclicker/build.gradle.kts explicitly sets applicationId if defined via convention plugin
+          # 1. Change Android APK applicationId in defaultConfig AFTER obfuscationConfig
+          # IMPORTANT: Do NOT change applicationId inside obfuscationConfig { ... } at lines 32-41 of
+          # smartautoclicker/build.gradle.kts, because ObfuscationPlugin uses obfuscationConfig.applicationId
+          # as the source folder path (src/main/java/com/buzbuz/smartautoclicker/ComponentConfig.kt).
           app_gradle = repo_dir / "smartautoclicker" / "build.gradle.kts"
           if app_gradle.exists():
               gtxt = app_gradle.read_text(encoding="utf-8")
-              if NEW_APP_ID not in gtxt and "defaultConfig {" in gtxt:
-                  gtxt = gtxt.replace(
-                      "defaultConfig {",
-                      'defaultConfig {\n        applicationId = "' + NEW_APP_ID + '"',
-                      1,
-                  )
-                  app_gradle.write_text(gtxt, encoding="utf-8")
-                  print("[Metadata] Injected explicit applicationId into smartautoclicker/build.gradle.kts")
+              override_block = (
+                  "\n// Override final APK applicationId after obfuscationConfig so ComponentConfig.kt stays in base package\n"
+                  "android {\n"
+                  "    defaultConfig {\n"
+                  f'        applicationId = "{NEW_APP_ID}"\n'
+                  "    }\n"
+                  "}\n"
+              )
+              if NEW_APP_ID not in gtxt:
+                  app_gradle.write_text(gtxt + override_block, encoding="utf-8")
+                  print(f"[Metadata] Appended android.defaultConfig.applicationId = {NEW_APP_ID} in smartautoclicker/build.gradle.kts")
 
           # 2. Update app_name in strings.xml so it appears as a new app on the phone
           app_src = repo_dir / "smartautoclicker" / "src"
@@ -479,3 +471,4 @@ jobs:
         with:
           name: Smart-AutoClicker-v3-Full-Source-And-APK
           path: Smart-AutoClicker-v3-Full-Source-And-APK.zip
+
